@@ -1,0 +1,17 @@
+services:
+  dugs-api:
+    build: .
+    ports:
+      - "5800:5800"
+    volumes:
+      - dugs_data:/data
+    restart: unless-stopped
+    # healthcheck lets `docker compose ps` / orchestrators know when it's ready
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5800/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dugs_data:
