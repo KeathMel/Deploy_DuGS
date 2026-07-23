@@ -1,0 +1,26 @@
+# DuGS Runner — leave your workflows running.
+#
+#   docker compose up -d      start
+#   docker compose logs -f    watch triggers fire
+#   docker compose down       stop
+#
+# Drop workflows exported from the DuGS app into ./projects and restart.
+
+services:
+  dugs:
+    build: .
+    image: dugs-runner
+    container_name: dugs-runner
+    restart: unless-stopped
+    ports:
+      - "5800:5800"
+    volumes:
+      # your exported workflows — the only thing that needs to change
+      - ./projects:/data/projects
+      # anything workflows write (tabels, credentials, memory banks)
+      - dugs_data:/data
+    environment:
+      - DUGS_DATA_DIR=/data
+
+volumes:
+  dugs_data:

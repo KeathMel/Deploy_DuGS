@@ -1,0 +1,4 @@
+{"name":"demo","kind":"normal",
+ "nodes":[{"name":"Every 5s","type":"trigger.schedule","params":{"mode":"interval","every":2,"unit":"seconds"}},
+          {"name":"Log","type":"core.log","params":{"label":"TICK"}}],
+ "connections":{"Every 5s":[{"to":"Log","out":0,"in":0}]}}
