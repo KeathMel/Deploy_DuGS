@@ -159,12 +159,13 @@ def _next_fire(params, last):
     return (last or datetime.now()) + timedelta(seconds=max(1.0, seconds))
 
 
-def scheduler_loop(engine, schedules, stop):
-    """One thread watching every schedule trigger. Sleeps in short ticks so it
-    stays responsive to shutdown instead of oversleeping a stop signal."""
+def scheduler_loop(engine, stop):
+    """One thread watching every schedule trigger. Reads the live list, so a
+    workflow deployed while running starts firing without a restart. Sleeps in
+    short ticks to stay responsive to shutdown."""
     while not stop.is_set():
         now = datetime.now()
-        for s in schedules:
+        for s in list(_schedules):
             if now >= s["next"]:
                 log(f"schedule fired: '{s['workflow']}' ({s['node']})")
                 run_workflow(engine, s["wf"], start_node=s["node"],
@@ -224,6 +225,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        # deploy: the app sends a workflow over and it starts running here,
+        # no file copying, no restart
+        if path == "/deploy":
+            return self._deploy(self._body())
         # run a workflow by name, whatever its trigger is
         if path.startswith("/run/"):
             name = path[len("/run/"):]
@@ -245,6 +250,31 @@ class Handler(BaseHTTPRequestHandler):
         if hit:
             return self._fire(hit, self._body())
         self._send(404, {"error": "no webhook at this path"})
+
+    def _deploy(self, wf):
+        """Take a workflow sent by the app, save it, and start running it.
+
+        No restart and no file copying: it lands in projects/ and its triggers
+        are registered on the spot, so a webhook answers immediately and a
+        schedule starts counting from now.
+        """
+        if not isinstance(wf, dict) or not wf.get("nodes"):
+            return self._send(400, {"error": "body must be a workflow JSON"})
+        name = wf.get("name") or "deployed"
+        if wf.get("kind") == "servo":
+            return self._send(400, {"error": "servo projects generate Arduino "
+                                             "code and can't run here"})
+        try:
+            os.makedirs(PROJECTS_DIR, exist_ok=True)
+            with open(os.path.join(PROJECTS_DIR, f"{name}.json"), "w") as f:
+                json.dump(wf, f, indent=2)
+        except Exception as e:
+            return self._send(500, {"error": f"could not save: {e}"})
+
+        reload_registry()
+        trigs = [t[1] for t in triggers_of(wf)]
+        log(f"deployed '{name}' ({', '.join(trigs) or 'no trigger'})")
+        return self._send(200, {"ok": True, "workflow": name, "triggers": trigs})
 
     def _fire(self, hit, data):
         log(f"webhook hit: {self.command} {self.path} -> '{hit['workflow']}'")
@@ -288,6 +318,56 @@ def build_registry(workflows):
     return hooks, schedules, manual
 
 
+# live state, so workflows can appear while the runner is up
+_schedules: list = []
+_reload_lock = threading.Lock()
+
+
+def reload_registry():
+    """Re-read projects/ and re-register every trigger, without restarting.
+
+    Existing schedules keep their next-fire time so reloading doesn't reset a
+    timer that was already counting down.
+    """
+    with _reload_lock:
+        workflows = load_workflows()
+        hooks, schedules, manual = build_registry(workflows)
+        # carry over the countdown of schedules we already knew about
+        old = {(s["workflow"], s["node"]): s for s in _schedules}
+        for s in schedules:
+            prev = old.get((s["workflow"], s["node"]))
+            if prev is not None:
+                s["next"] = prev["next"]
+                s["last"] = prev["last"]
+        _schedules[:] = schedules
+        Handler.hooks = hooks
+        Handler.workflows = workflows
+        return workflows, hooks, schedules, manual
+
+
+def watch_projects(stop, interval=3.0):
+    """Notice new or changed workflow files and pick them up automatically,
+    so dropping a .json into projects/ is enough — no restart."""
+    def snapshot():
+        try:
+            return {f: os.path.getmtime(os.path.join(PROJECTS_DIR, f))
+                    for f in os.listdir(PROJECTS_DIR) if f.endswith(".json")}
+        except Exception:
+            return {}
+    last = snapshot()
+    while not stop.is_set():
+        stop.wait(interval)
+        if stop.is_set():
+            break
+        now = snapshot()
+        if now != last:
+            changed = set(now) ^ set(last)
+            changed |= {f for f in set(now) & set(last) if now[f] != last[f]}
+            log(f"projects changed ({', '.join(sorted(changed))}) — reloading")
+            reload_registry()
+            last = now
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run DuGS workflows on their triggers.")
     ap.add_argument("--run", metavar="NAME", help="run one workflow now and exit")
@@ -303,10 +383,9 @@ def main():
     log(f"data dir : {DATA_DIR}")
 
     engine = load_engine()
-    workflows = load_workflows()
+    Handler.engine = engine
+    workflows, hooks, schedules, manual = reload_registry()
     log(f"loaded {len(workflows)} workflow(s)")
-
-    hooks, schedules, manual = build_registry(workflows)
 
     if args.list:
         for name, wf in sorted(workflows.items()):
@@ -331,15 +410,15 @@ def main():
         log(f"manual   {name:24} POST /run/{name}")
 
     stop = threading.Event()
-    if schedules:
-        threading.Thread(target=scheduler_loop, args=(engine, schedules, stop),
-                         daemon=True).start()
+    # always run both: a workflow deployed later may add the first schedule
+    threading.Thread(target=scheduler_loop, args=(engine, stop),
+                     daemon=True).start()
+    threading.Thread(target=watch_projects, args=(stop,), daemon=True).start()
 
-    Handler.engine = engine
-    Handler.hooks = hooks
-    Handler.workflows = workflows
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     log(f"listening on http://{args.host}:{args.port}")
+    log("watching projects/ — drop a workflow in and it starts by itself")
+    log("or POST one to /deploy from the app")
     log("ctrl-c to stop")
     try:
         server.serve_forever()

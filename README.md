@@ -39,7 +39,13 @@ That's it. It runs anywhere Python runs — including a phone under Termux.
 
 ## USING IT
 
-Put your workflows (exported from the DuGS app) into `projects/`.
+Two ways to get a workflow in here:
+
+**From the app** — hit the Deploy button, type this runner's address. It lands
+here and starts running straight away, no restart.
+
+**By hand** — drop the .json into `projects/`. The runner notices within a few
+seconds and picks it up on its own.
 
 ```
 python3 dugs_runner.py                    # run everything on its triggers
@@ -54,6 +60,7 @@ While it's running:
 curl http://localhost:5800/health         # is it alive
 curl http://localhost:5800/workflows      # what's loaded
 curl -X POST http://localhost:5800/run/my_workflow    # run one over http
+curl -X POST http://localhost:5800/deploy -d @wf.json # send a workflow in
 ```
 
 Webhook workflows answer on whatever path you gave them in the app.
@@ -67,8 +74,9 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Your workflows are mounted from `./projects`, so changing one is dropping a file
-and restarting — the image doesn't get rebuilt for that.
+Your workflows are mounted from `./projects`, so dropping a file in on your
+machine puts it inside the container too — no container paths to work out, and
+no rebuild. The runner notices and picks it up by itself.
 
 Without compose:
 
