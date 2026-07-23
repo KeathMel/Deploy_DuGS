@@ -1,3 +1,0 @@
-# dugs-api is pure Python standard library today — nothing to install.
-# If a node ever needs a real dependency (e.g. `requests`, `paho-mqtt`),
-# add it here; the Dockerfile already picks this file up automatically.
